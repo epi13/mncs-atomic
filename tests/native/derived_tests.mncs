@@ -1,0 +1,52 @@
+mncs 0.18;
+
+// Native contracts for derived quantities: kinetic temperature
+// (reduced and SI-spelled) and the drift-acceptance predicate.
+
+module mncs.atomic.test.derived.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.derived;
+
+test reduced_temperature_exact() -> (result: TestResult) {
+    // T* = 2K/dof = 2·0.5/2 = 0.5 with kB = 1.
+    let good: bool = match kinetic_temperature(0.5, 2, 1.0) {
+        TempOut.Value { t } => t == 0.5,
+        TempOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7501));
+}
+
+test zero_kinetic_gives_zero_temperature() -> (result: TestResult) {
+    // A quiescent state is valid physics at T = 0, not a degenerate.
+    let good: bool = match kinetic_temperature(0.0, 2, 1.0) {
+        TempOut.Value { t } => t == 0.0,
+        TempOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7502));
+}
+
+test temperature_rejects_unphysical() -> (result: TestResult) {
+    let bad_kb: bool = match kinetic_temperature(0.5, 2, 0.0) {
+        TempOut.Value { t } => t != t,
+        TempOut.BadInput => true,
+    };
+    let bad_ke: bool = match kinetic_temperature(0.0 - 0.5, 2, 1.0) {
+        TempOut.Value { t } => t != t,
+        TempOut.BadInput => true,
+    };
+    let bad_dof: bool = match kinetic_temperature(0.5, 0, 1.0) {
+        TempOut.Value { t } => t != t,
+        TempOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_kb && bad_ke && bad_dof, 7503));
+}
+
+test drift_predicate() -> (result: TestResult) {
+    let yes: bool = drift_within(0.000042, 0.0001);
+    let no: bool = drift_within(0.0002, 0.0001) == false;
+    // A non-positive tolerance accepts nothing: structured false.
+    let bad: bool = drift_within(0.0, 0.0) == false && drift_within(0.0, 0.0 - 1.0) == false;
+    return from_assertion(equals_bool(true, yes && no && bad, 7504));
+}

@@ -1,0 +1,93 @@
+mncs 0.18;
+
+// Native contracts for the Lennard-Jones pair kernel: exact dyadic
+// values at r = sigma and r = 2·sigma, well-minimum agreement,
+// cutoff policy, invalid-state structure, and force antisymmetry.
+
+module mncs.atomic.test.lj.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.lj;
+use mncs.numerics.scalar_float;
+
+test pair_at_sigma_exact() -> (result: TestResult) {
+    // r² = 1: F/r = 24, U = 0, exactly.
+    let good: bool = match lj_pair(1.0, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => f_over_r == 24.0 && u == 0.0,
+        PairOut.Neglected => false,
+        PairOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7301));
+}
+
+test pair_at_two_sigma_exact() -> (result: TestResult) {
+    // r² = 4: F/r = -93/1024, U = -63/1024, exactly (oracle rationals).
+    let good: bool = match lj_pair(4.0, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => f_over_r == 0.0 - 0.0908203125 && u == 0.0 - 0.0615234375,
+        PairOut.Neglected => false,
+        PairOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7302));
+}
+
+test well_minimum_agreement() -> (result: TestResult) {
+    // r* = 2^(1/6) ≈ 1.12246: F ≈ 0, U ≈ -eps.
+    let tol: f64 = 0.000000001;
+    let good: bool = match lj_pair(1.122462048309373 * 1.122462048309373, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => approx(f_over_r * 1.122462048309373, 0.0, tol, 0.0) && approx(u, 0.0 - 1.0, tol, tol),
+        PairOut.Neglected => false,
+        PairOut.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7303));
+}
+
+test cutoff_policy() -> (result: TestResult) {
+    // Within: r = 2.5 is inside rc = 2.5 (closed boundary).
+    let inside: bool = match lj_pair(6.25, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => u != 0.0,
+        PairOut.Neglected => false,
+        PairOut.BadInput => false,
+    };
+    // Beyond: r = 3 is neglected, a legitimate statement, not an error.
+    let beyond: bool = match lj_pair(9.0, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => u != u,
+        PairOut.Neglected => true,
+        PairOut.BadInput => false,
+    };
+    // Degenerate cutoff is a bad model, not silent truncation.
+    let bad_rc: bool = match lj_pair(1.0, 1.0, 1.0, 0.0) {
+        PairOut.Value { f_over_r, u } => u != u,
+        PairOut.Neglected => false,
+        PairOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, inside && beyond && bad_rc, 7304));
+}
+
+test invalid_states_structured() -> (result: TestResult) {
+    // Coincident lanes: singular potential, structured refusal.
+    let coinc: bool = match lj_pair(0.0, 1.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => u != u,
+        PairOut.Neglected => false,
+        PairOut.BadInput => true,
+    };
+    let bad_eps: bool = match lj_pair(1.0, 0.0, 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => u != u,
+        PairOut.Neglected => false,
+        PairOut.BadInput => true,
+    };
+    let bad_sig: bool = match lj_pair(1.0, 1.0, 0.0 - 1.0, 2.5) {
+        PairOut.Value { f_over_r, u } => u != u,
+        PairOut.Neglected => false,
+        PairOut.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, coinc && bad_eps && bad_sig, 7305));
+}
+
+test force_projection_antisymmetric() -> (result: TestResult) {
+    // One signed value, two signs: f0 + f1 == 0 bitwise.
+    let f0: f64 = pair_force_0(24.0, 1.0);
+    let f1: f64 = pair_force_1(24.0, 1.0);
+    let acc: ForcePair = accumulate_pair(f0, f1, 1.5, 0.0 - 2.5);
+    return from_assertion(equals_bool(true, f0 == 0.0 - 24.0 && f1 == 24.0 && f0 + f1 == 0.0 && acc.a0 == 0.0 - 22.5 && acc.a1 == 21.5, 7306));
+}

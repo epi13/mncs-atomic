@@ -1,0 +1,295 @@
+mncs 0.18;
+
+// mncs.atomic.integrator.v1 — velocity-Verlet dynamics in 1D.
+//
+// One VV step for a pair (masses m0, m1, timestep dt):
+//
+//   x' = x + v*dt + F/(2m)*dt²   (both lanes, old forces),
+//   F' = forces(x')              (re-evaluated at new positions),
+//   v' = v + (F + F')/(2m)*dt.
+//
+// Forces come from exactly one LJ evaluation per step, applied as
+// +f/-f: Newton-III antisymmetry is structural, so total momentum
+// conservation does not depend on the potential's accuracy. A pair
+// beyond the cutoff drifts freely (zero force, valid step, u = 0).
+// Coincident lanes or degenerate parameters are `BadInput` data.
+//
+// Fixed-count drivers (32 steps; 8 nested blocks of 32 = 256 steps)
+// carry a run record tracking energy drift and separation extrema:
+// bounded horizons are declared computation, not tuning. The suite
+// pins drift, oscillation extrema, bitwise momentum, and trajectory
+// agreement against the independent oracle.
+//
+// Mathematical term -> implemented term:
+//   F(x), U(x)            ->  lj_pair + pair_force_0/1
+//   VV position/velocity  ->  vv_kick_2 / vv_drift_2
+//   K, P, E               ->  kinetic_2 / momentum_2 / total_energy
+//   drift/extrema horizon ->  Run2 + run_32_2 / run_256_2
+
+module mncs.atomic.integrator.v1;
+
+use mncs.atomic.state1d;
+use mncs.atomic.lj;
+use mncs.numerics.scalar_float;
+
+// One pair step: new positions, velocities, and pair energy.
+enum Step2 { Value { x0: f64, x1: f64, v0: f64, v1: f64, u: f64 }, BadInput }
+
+fn vv_step_2(
+    x0: f64, x1: f64, v0: f64, v1: f64,
+    m0: f64, m1: f64, dt: f64,
+    eps: f64, sig: f64, b: Box, rc: f64
+) -> (result: Step2) {
+    if m0 <= 0.0 {
+        return Step2.BadInput;
+    }
+    if m1 <= 0.0 {
+        return Step2.BadInput;
+    }
+    if dt <= 0.0 {
+        return Step2.BadInput;
+    }
+    return match min_image(x1 - x0, b) {
+        ImageOut.Value { dx } => vv_forces_2(x0, x1, v0, v1, m0, m1, dt, eps, sig, b, rc, dx),
+        ImageOut.BadBox => Step2.BadInput,
+    };
+}
+
+fn vv_forces_2(
+    x0: f64, x1: f64, v0: f64, v1: f64,
+    m0: f64, m1: f64, dt: f64,
+    eps: f64, sig: f64, b: Box, rc: f64, dx: f64
+) -> (result: Step2) {
+    return match lj_pair(dx * dx, eps, sig, rc) {
+        PairOut.Value { f_over_r, u } => vv_kick_2(x0, x1, v0, v1, m0, m1, dt, eps, sig, b, rc, dx, f_over_r),
+        PairOut.Neglected => vv_drift_2(x0, x1, v0, v1, dt),
+        PairOut.BadInput => Step2.BadInput,
+    };
+}
+
+fn vv_drift_2(x0: f64, x1: f64, v0: f64, v1: f64, dt: f64) -> (result: Step2) {
+    return Step2.Value { x0: x0 + v0 * dt, x1: x1 + v1 * dt, v0: v0, v1: v1, u: 0.0 };
+}
+
+fn vv_kick_2(
+    x0: f64, x1: f64, v0: f64, v1: f64,
+    m0: f64, m1: f64, dt: f64,
+    eps: f64, sig: f64, b: Box, rc: f64, dx: f64, f_over_r: f64
+) -> (result: Step2) {
+    let f0: f64 = pair_force_0(f_over_r, dx);
+    let f1: f64 = pair_force_1(f_over_r, dx);
+    let nx0: f64 = x0 + v0 * dt + f0 / (2.0 * m0) * dt * dt;
+    let nx1: f64 = x1 + v1 * dt + f1 / (2.0 * m1) * dt * dt;
+    return match min_image(nx1 - nx0, b) {
+        ImageOut.Value { dx } => vv_finish_2(nx0, nx1, v0, v1, m0, m1, dt, eps, sig, rc, dx, f0, f1),
+        ImageOut.BadBox => Step2.BadInput,
+    };
+}
+
+fn vv_finish_2(
+    nx0: f64, nx1: f64, v0: f64, v1: f64,
+    m0: f64, m1: f64, dt: f64,
+    eps: f64, sig: f64, rc: f64, ndx: f64, f0: f64, f1: f64
+) -> (result: Step2) {
+    return match lj_pair(ndx * ndx, eps, sig, rc) {
+        PairOut.Value { f_over_r, u } => vv_close_2(nx0, nx1, v0, v1, m0, m1, dt, ndx, f0, f1, f_over_r, u),
+        PairOut.Neglected => vv_close_2(nx0, nx1, v0, v1, m0, m1, dt, ndx, f0, f1, 0.0, 0.0),
+        PairOut.BadInput => Step2.BadInput,
+    };
+}
+
+fn vv_close_2(
+    nx0: f64, nx1: f64, v0: f64, v1: f64,
+    m0: f64, m1: f64, dt: f64, ndx: f64,
+    f0: f64, f1: f64, nf_over_r: f64, u: f64
+) -> (result: Step2) {
+    let nf0: f64 = pair_force_0(nf_over_r, ndx);
+    let nf1: f64 = pair_force_1(nf_over_r, ndx);
+    return Step2.Value {
+        x0: nx0,
+        x1: nx1,
+        v0: v0 + (f0 + nf0) / (2.0 * m0) * dt,
+        v1: v1 + (f1 + nf1) / (2.0 * m1) * dt,
+        u: u,
+    };
+}
+
+// Kinetic energy, total momentum, total energy (all total on finite
+// inputs; validity is established upstream).
+fn kinetic_2(v0: f64, v1: f64, m0: f64, m1: f64) -> (result: f64) {
+    return 0.5 * m0 * v0 * v0 + 0.5 * m1 * v1 * v1;
+}
+
+fn momentum_2(v0: f64, v1: f64, m0: f64, m1: f64) -> (result: f64) {
+    return m0 * v0 + m1 * v1;
+}
+
+fn total_energy(ke: f64, u: f64) -> (result: f64) {
+    return ke + u;
+}
+
+// ---- three-lane static force accumulation ----
+
+record Forces3 { f0: f64, f1: f64, f2: f64, u: f64 }
+
+enum Force3Out { Value { f: Forces3 }, BadInput }
+
+record Acc3 { f0: f64, f1: f64, f2: f64, u: f64, ok: bool }
+
+fn pair_forces_3(x0: f64, x1: f64, x2: f64, eps: f64, sig: f64, b: Box, rc: f64) -> (result: Force3Out) {
+    if eps <= 0.0 {
+        return Force3Out.BadInput;
+    }
+    if sig <= 0.0 {
+        return Force3Out.BadInput;
+    }
+    if rc <= 0.0 {
+        return Force3Out.BadInput;
+    }
+    let seed: Acc3 = Acc3 { f0: 0.0, f1: 0.0, f2: 0.0, u: 0.0, ok: true };
+    let a01: Acc3 = add_pair_01(seed, x0, x1, eps, sig, b, rc);
+    let a02: Acc3 = add_pair_02(a01, x0, x2, eps, sig, b, rc);
+    let a12: Acc3 = add_pair_12(a02, x1, x2, eps, sig, b, rc);
+    if a12.ok == false {
+        return Force3Out.BadInput;
+    }
+    return Force3Out.Value { f: Forces3 { f0: a12.f0, f1: a12.f1, f2: a12.f2, u: a12.u } };
+}
+
+fn add_pair_01(a: Acc3, x0: f64, x1: f64, eps: f64, sig: f64, b: Box, rc: f64) -> (result: Acc3) {
+    if a.ok == false {
+        return a;
+    }
+    return match min_image(x1 - x0, b) {
+        ImageOut.Value { dx } => add_dx_01(a, dx, eps, sig, rc),
+        ImageOut.BadBox => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+fn add_dx_01(a: Acc3, dx: f64, eps: f64, sig: f64, rc: f64) -> (result: Acc3) {
+    return match lj_pair(dx * dx, eps, sig, rc) {
+        PairOut.Value { f_over_r, u } => Acc3 {
+            f0: a.f0 + pair_force_0(f_over_r, dx),
+            f1: a.f1 + pair_force_1(f_over_r, dx),
+            f2: a.f2,
+            u: a.u + u,
+            ok: true,
+        },
+        PairOut.Neglected => a,
+        PairOut.BadInput => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+fn add_pair_02(a: Acc3, x0: f64, x2: f64, eps: f64, sig: f64, b: Box, rc: f64) -> (result: Acc3) {
+    if a.ok == false {
+        return a;
+    }
+    return match min_image(x2 - x0, b) {
+        ImageOut.Value { dx } => add_dx_02(a, dx, eps, sig, rc),
+        ImageOut.BadBox => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+fn add_dx_02(a: Acc3, dx: f64, eps: f64, sig: f64, rc: f64) -> (result: Acc3) {
+    return match lj_pair(dx * dx, eps, sig, rc) {
+        PairOut.Value { f_over_r, u } => Acc3 {
+            f0: a.f0 + pair_force_0(f_over_r, dx),
+            f1: a.f1,
+            f2: a.f2 + pair_force_1(f_over_r, dx),
+            u: a.u + u,
+            ok: true,
+        },
+        PairOut.Neglected => a,
+        PairOut.BadInput => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+fn add_pair_12(a: Acc3, x1: f64, x2: f64, eps: f64, sig: f64, b: Box, rc: f64) -> (result: Acc3) {
+    if a.ok == false {
+        return a;
+    }
+    return match min_image(x2 - x1, b) {
+        ImageOut.Value { dx } => add_dx_12(a, dx, eps, sig, rc),
+        ImageOut.BadBox => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+fn add_dx_12(a: Acc3, dx: f64, eps: f64, sig: f64, rc: f64) -> (result: Acc3) {
+    return match lj_pair(dx * dx, eps, sig, rc) {
+        PairOut.Value { f_over_r, u } => Acc3 {
+            f0: a.f0,
+            f1: a.f1 + pair_force_0(f_over_r, dx),
+            f2: a.f2 + pair_force_1(f_over_r, dx),
+            u: a.u + u,
+            ok: true,
+        },
+        PairOut.Neglected => a,
+        PairOut.BadInput => Acc3 { f0: a.f0, f1: a.f1, f2: a.f2, u: a.u, ok: false },
+    };
+}
+
+// ---- bounded 256-step horizon with drift/extrema tracking ----
+
+// Fixed dynamics parameters (validated once at the model layer).
+record Params { m0: f64, m1: f64, dt: f64, eps: f64, sig: f64, rc: f64 }
+
+// Carried run state: field, reference energy, worst drift observed,
+// separation extrema, and a sticky failure flag.
+record Run2 { x0: f64, x1: f64, v0: f64, v1: f64, u: f64, e0: f64, maxdrift: f64, rmin: f64, rmax: f64, ok: bool }
+
+fn run_init_2(x0: f64, x1: f64, v0: f64, v1: f64, u: f64, e0: f64, rsep: f64) -> (result: Run2) {
+    return Run2 { x0: x0, x1: x1, v0: v0, v1: v1, u: u, e0: e0, maxdrift: 0.0, rmin: rsep, rmax: rsep, ok: true };
+}
+
+fn run_failed(r: Run2) -> (result: Run2) {
+    return Run2 {
+        x0: r.x0, x1: r.x1, v0: r.v0, v1: r.v1, u: r.u, e0: r.e0,
+        maxdrift: r.maxdrift, rmin: r.rmin, rmax: r.rmax, ok: false,
+    };
+}
+
+fn advance_run_2(r: Run2, p: Params, b: Box) -> (result: Run2) {
+    if r.ok == false {
+        return r;
+    }
+    return match vv_step_2(r.x0, r.x1, r.v0, r.v1, p.m0, p.m1, p.dt, p.eps, p.sig, b, p.rc) {
+        Step2.Value { x0, x1, v0, v1, u } => track_run_2(r, p, b, x0, x1, v0, v1, u),
+        Step2.BadInput => run_failed(r),
+    };
+}
+
+fn track_run_2(r: Run2, p: Params, b: Box, x0: f64, x1: f64, v0: f64, v1: f64, u: f64) -> (result: Run2) {
+    return match min_image(x1 - x0, b) {
+        ImageOut.Value { dx } => track_sep_2(r, p, x0, x1, v0, v1, u, fabs(dx)),
+        ImageOut.BadBox => run_failed(r),
+    };
+}
+
+fn track_sep_2(r: Run2, p: Params, x0: f64, x1: f64, v0: f64, v1: f64, u: f64, rsep: f64) -> (result: Run2) {
+    let e: f64 = total_energy(kinetic_2(v0, v1, p.m0, p.m1), u);
+    let drift: f64 = fabs(e - r.e0);
+    return Run2 {
+        x0: x0, x1: x1, v0: v0, v1: v1, u: u, e0: r.e0,
+        maxdrift: fmax(r.maxdrift, drift),
+        rmin: fmin(r.rmin, rsep),
+        rmax: fmax(r.rmax, rsep),
+        ok: true,
+    };
+}
+
+// 32-step block; 256-step horizon as 8 nested blocks (two bounded
+// levels). Counts are declared; the caller contract is validated
+// Params + Box (the model layer owns the outcome mapping).
+fn run_32_2(r: Run2, p: Params, b: Box) -> (result: Run2) {
+    iterate s up_to 32 carrying q: Run2 = r {
+        next q = advance_run_2(q, p, b);
+    }
+    return q;
+}
+
+fn run_256_2(r: Run2, p: Params, b: Box) -> (result: Run2) {
+    iterate o up_to 8 carrying q: Run2 = r {
+        next q = run_32_2(q, p, b);
+    }
+    return q;
+}

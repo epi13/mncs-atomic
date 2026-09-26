@@ -1,0 +1,205 @@
+mncs 0.18;
+
+// mncs.atomic.model1d.v1 — end-to-end 1D Lennard-Jones workloads.
+//
+// Three substantive paths, all native except language float ops and
+// consumed `mncs.numerics.scalar_float` discipline:
+//
+//   dimer_at_sigma — static pair at r = sigma, v = 0: force
+//     ∓24·eps/sigma, U = 0, P = 0, E = 0 (exact in reduced units).
+//   dimer_run — 256 velocity-Verlet steps from a displaced rest
+//     start: oscillation with tracked drift/extrema, bitwise
+//     momentum, closed-form clock.
+//   chain_static_3 — three-lane superposition: pairwise LJ forces
+//     accumulated per lane, total U, Newton-III zero-sum.
+//
+// Validation order is a contract: species -> box -> distinct ids ->
+// step/cutoff params -> pair evaluation. `BadInput` (unphysical
+// description) is the only model failure here: explicit VV has no
+// algebraic solve, so there is no solver failure to distinguish —
+// the stability evidence is the measured drift bound asserted in
+// the suite, not a gate.
+
+module mncs.atomic.model1d.v1;
+
+use mncs.atomic.species;
+use mncs.atomic.state1d;
+use mncs.atomic.lj;
+use mncs.atomic.integrator;
+use mncs.numerics.scalar_float;
+
+// ---- static dimer at r = sigma ----
+
+enum DimerStatic { Value { f0: f64, f1: f64, u: f64, ke: f64, p: f64 }, BadInput }
+
+fn dimer_at_sigma(id0: u64, id1: u64, s: Species, b: Box) -> (result: DimerStatic) {
+    return match check_species(s) {
+        SpecCheck.Ok => dimer_at_sigma_box(id0, id1, s, b),
+        SpecCheck.BadMass => DimerStatic.BadInput,
+        SpecCheck.BadEpsilon => DimerStatic.BadInput,
+        SpecCheck.BadSigma => DimerStatic.BadInput,
+    };
+}
+
+fn dimer_at_sigma_box(id0: u64, id1: u64, s: Species, b: Box) -> (result: DimerStatic) {
+    return match check_box(b) {
+        BoxCheck.Ok => dimer_at_sigma_ids(id0, id1, s, b),
+        BoxCheck.BadLength => DimerStatic.BadInput,
+    };
+}
+
+fn dimer_at_sigma_ids(id0: u64, id1: u64, s: Species, b: Box) -> (result: DimerStatic) {
+    return match check_dimer_ids(id0, id1) {
+        IdsOut.Distinct => dimer_at_sigma_pair(s, b),
+        IdsOut.Duplicated => DimerStatic.BadInput,
+    };
+}
+
+fn dimer_at_sigma_pair(s: Species, b: Box) -> (result: DimerStatic) {
+    return match min_image(s.sigma - 0.0, b) {
+        ImageOut.Value { dx } => dimer_at_sigma_eval(s, dx),
+        ImageOut.BadBox => DimerStatic.BadInput,
+    };
+}
+
+fn dimer_at_sigma_eval(s: Species, dx: f64) -> (result: DimerStatic) {
+    return match lj_pair(dx * dx, s.epsilon, s.sigma, 2.5 * s.sigma) {
+        PairOut.Value { f_over_r, u } => DimerStatic.Value {
+            f0: pair_force_0(f_over_r, dx),
+            f1: pair_force_1(f_over_r, dx),
+            u: u,
+            ke: 0.0,
+            p: 0.0,
+        },
+        PairOut.Neglected => DimerStatic.BadInput,
+        PairOut.BadInput => DimerStatic.BadInput,
+    };
+}
+
+// ---- 256-step dimer dynamics ----
+
+enum DimerRun {
+    Value {
+        x0: f64, x1: f64, v0: f64, v1: f64,
+        u: f64, ke: f64, p: f64,
+        t: f64, steps: u64,
+        maxdrift: f64, rmin: f64, rmax: f64
+    },
+    BadInput
+}
+
+fn dimer_run(
+    id0: u64, id1: u64, s: Species, b: Box,
+    x0: f64, x1: f64, dt: f64, rc: f64
+) -> (result: DimerRun) {
+    return match check_species(s) {
+        SpecCheck.Ok => dimer_run_box(id0, id1, s, b, x0, x1, dt, rc),
+        SpecCheck.BadMass => DimerRun.BadInput,
+        SpecCheck.BadEpsilon => DimerRun.BadInput,
+        SpecCheck.BadSigma => DimerRun.BadInput,
+    };
+}
+
+fn dimer_run_box(
+    id0: u64, id1: u64, s: Species, b: Box,
+    x0: f64, x1: f64, dt: f64, rc: f64
+) -> (result: DimerRun) {
+    return match check_box(b) {
+        BoxCheck.Ok => dimer_run_ids(id0, id1, s, b, x0, x1, dt, rc),
+        BoxCheck.BadLength => DimerRun.BadInput,
+    };
+}
+
+fn dimer_run_ids(
+    id0: u64, id1: u64, s: Species, b: Box,
+    x0: f64, x1: f64, dt: f64, rc: f64
+) -> (result: DimerRun) {
+    return match check_dimer_ids(id0, id1) {
+        IdsOut.Distinct => dimer_run_params(s, b, x0, x1, dt, rc),
+        IdsOut.Duplicated => DimerRun.BadInput,
+    };
+}
+
+fn dimer_run_params(s: Species, b: Box, x0: f64, x1: f64, dt: f64, rc: f64) -> (result: DimerRun) {
+    if dt <= 0.0 {
+        return DimerRun.BadInput;
+    }
+    if rc <= 0.0 {
+        return DimerRun.BadInput;
+    }
+    return match min_image(x1 - x0, b) {
+        ImageOut.Value { dx } => dimer_run_init(s, b, x0, x1, dt, rc, dx),
+        ImageOut.BadBox => DimerRun.BadInput,
+    };
+}
+
+fn dimer_run_init(s: Species, b: Box, x0: f64, x1: f64, dt: f64, rc: f64, dx: f64) -> (result: DimerRun) {
+    return match lj_pair(dx * dx, s.epsilon, s.sigma, rc) {
+        PairOut.Value { f_over_r, u } => dimer_run_go(s, b, x0, x1, dt, rc, dx, u),
+        PairOut.Neglected => dimer_run_go(s, b, x0, x1, dt, rc, dx, 0.0),
+        PairOut.BadInput => DimerRun.BadInput,
+    };
+}
+
+fn dimer_run_go(s: Species, b: Box, x0: f64, x1: f64, dt: f64, rc: f64, dx: f64, u: f64) -> (result: DimerRun) {
+    let p: Params = Params { m0: s.mass, m1: s.mass, dt: dt, eps: s.epsilon, sig: s.sigma, rc: rc };
+    let e0: f64 = total_energy(kinetic_2(0.0, 0.0, s.mass, s.mass), u);
+    let done: Run2 = run_256_2(run_init_2(x0, x1, 0.0, 0.0, u, e0, fabs(dx)), p, b);
+    if done.ok == false {
+        return DimerRun.BadInput;
+    }
+    return DimerRun.Value {
+        x0: done.x0, x1: done.x1, v0: done.v0, v1: done.v1,
+        u: done.u,
+        ke: kinetic_2(done.v0, done.v1, s.mass, s.mass),
+        p: momentum_2(done.v0, done.v1, s.mass, s.mass),
+        t: dt * 256.0, steps: 256,
+        maxdrift: done.maxdrift, rmin: done.rmin, rmax: done.rmax,
+    };
+}
+
+// ---- three-lane static superposition ----
+
+enum Chain3 { Value { f0: f64, f1: f64, f2: f64, u: f64 }, BadInput }
+
+fn chain_static_3(
+    id0: u64, id1: u64, id2: u64, s: Species, b: Box,
+    x0: f64, x1: f64, x2: f64, rc: f64
+) -> (result: Chain3) {
+    return match check_species(s) {
+        SpecCheck.Ok => chain_static_3_box(id0, id1, id2, s, b, x0, x1, x2, rc),
+        SpecCheck.BadMass => Chain3.BadInput,
+        SpecCheck.BadEpsilon => Chain3.BadInput,
+        SpecCheck.BadSigma => Chain3.BadInput,
+    };
+}
+
+fn chain_static_3_box(
+    id0: u64, id1: u64, id2: u64, s: Species, b: Box,
+    x0: f64, x1: f64, x2: f64, rc: f64
+) -> (result: Chain3) {
+    return match check_box(b) {
+        BoxCheck.Ok => chain_static_3_ids(id0, id1, id2, s, b, x0, x1, x2, rc),
+        BoxCheck.BadLength => Chain3.BadInput,
+    };
+}
+
+fn chain_static_3_ids(
+    id0: u64, id1: u64, id2: u64, s: Species, b: Box,
+    x0: f64, x1: f64, x2: f64, rc: f64
+) -> (result: Chain3) {
+    return match check_trimer_ids(id0, id1, id2) {
+        IdsOut.Distinct => chain_static_3_go(s, b, x0, x1, x2, rc),
+        IdsOut.Duplicated => Chain3.BadInput,
+    };
+}
+
+fn chain_static_3_go(s: Species, b: Box, x0: f64, x1: f64, x2: f64, rc: f64) -> (result: Chain3) {
+    if rc <= 0.0 {
+        return Chain3.BadInput;
+    }
+    return match pair_forces_3(x0, x1, x2, s.epsilon, s.sigma, b, rc) {
+        Force3Out.Value { f } => Chain3.Value { f0: f.f0, f1: f.f1, f2: f.f2, u: f.u },
+        Force3Out.BadInput => Chain3.BadInput,
+    };
+}

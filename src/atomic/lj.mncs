@@ -1,0 +1,75 @@
+mncs 0.18;
+
+// mncs.atomic.lj.v1 — Lennard-Jones pair interaction.
+//
+//   U(r)  = 4*eps*((sig/r)^12 - (sig/r)^6),
+//   F(r)  = 24*eps*(2*(sig/r)^12 - (sig/r)^6)/r   (outward +r).
+//
+// Computed from the SQUARED distance only: sr2 = sig²/r²,
+// sr6 = sr2³, sr12 = sr6² — no square root anywhere, so no Numeric
+// sqrt pressure is spent here. The kernel returns F/r (force over
+// separation) plus U; callers project onto the pair axis as
+// f0 = -(F/r)*dx, f1 = +(F/r)*dx, which makes Newton-III
+// antisymmetry structural (one value, two signs).
+//
+// Cutoff: truncated (NOT shifted) at rc — stated plainly so the
+// energy discontinuity at rc is nobody's surprise. Beyond rc the
+// pair is `Neglected`: a legitimate physical statement (no
+// interaction), not an error. Coincident lanes (r² = 0) are
+// `BadInput`: the potential is singular there and the model must
+// say so instead of dividing by zero. Non-positive
+// epsilon/sigma/cutoff are `BadInput` before any arithmetic.
+//
+// Mathematical term -> implemented term:
+//   (sig/r)^6, (sig/r)^12  ->  sr6, sr12 from sr2
+//   U                      ->  u = 4*eps*(sr12 - sr6)
+//   F                      ->  f_over_r = 24*eps*(2*sr12 - sr6)/r²
+
+module mncs.atomic.lj.v1;
+
+// Outcome of one pair evaluation.
+enum PairOut { Value { f_over_r: f64, u: f64 }, Neglected, BadInput }
+
+fn lj_pair(r2: f64, epsilon: f64, sigma: f64, cutoff: f64) -> (result: PairOut) {
+    if epsilon <= 0.0 {
+        return PairOut.BadInput;
+    }
+    if sigma <= 0.0 {
+        return PairOut.BadInput;
+    }
+    if cutoff <= 0.0 {
+        return PairOut.BadInput;
+    }
+    if r2 <= 0.0 {
+        return PairOut.BadInput;
+    }
+    if r2 > cutoff * cutoff {
+        return PairOut.Neglected;
+    }
+    let sr2: f64 = sigma * sigma / r2;
+    let sr6: f64 = sr2 * sr2 * sr2;
+    let sr12: f64 = sr6 * sr6;
+    return PairOut.Value {
+        f_over_r: 24.0 * epsilon * (2.0 * sr12 - sr6) / r2,
+        u: 4.0 * epsilon * (sr12 - sr6),
+    };
+}
+
+// Force on lane 0 of a pair along +x: f0 = -(F/r)*dx.
+// One signed value negated — antisymmetry by construction.
+fn pair_force_0(f_over_r: f64, dx: f64) -> (result: f64) {
+    return 0.0 - f_over_r * dx;
+}
+
+fn pair_force_1(f_over_r: f64, dx: f64) -> (result: f64) {
+    return f_over_r * dx;
+}
+
+// Accumulate one pair's force onto lane accumulators (Newton-III:
+// equal and opposite by construction, so total momentum is
+// structurally conserved whatever the potential computes).
+fn accumulate_pair(f0: f64, f1: f64, g0: f64, g1: f64) -> (result: ForcePair) {
+    return ForcePair { a0: f0 + g0, a1: f1 + g1 };
+}
+
+record ForcePair { a0: f64, a1: f64 }

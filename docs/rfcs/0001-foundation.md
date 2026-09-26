@@ -1,6 +1,30 @@
 # RFC 0001: Molecular/particle simulation foundation
 
-Status: Draft
+Status: Partially implemented (foundation slice, 2026-09-26).
+Superseded statements are marked below; the principles stand.
+
+Implemented: explicit units/potentials/cutoffs/BCs (`species`,
+`lj`, `state1d`); integrator timestep recorded with results
+(`DimerRun` carries dt/steps); force/energy/conservation
+evidence before any performance claim (`VERIFICATION.md`);
+deterministic force accumulation with Newton-III ordering
+(`integrator`); classical MD only, quantum exclusion honored
+(README disambiguation).
+
+Deferred (deliberately): neighbor-list rebuild semantics (no
+N exists yet that needs lists — all-pairs is exact at N ≤ 3);
+parallel reduction-ordering modes (single deterministic mode
+only); GPU layout/scheduling contracts (no accelerated path);
+ensemble/temperature controls beyond kinetic temperature;
+checkpoints/trajectories.
+
+Pressure objectives status: periodic-boundary ops PROVEN 1D;
+deterministic accumulation PROVEN (bitwise momentum);
+structured drift evidence PROVEN. Large arrays, SoA/AoS
+transforms, spatial hashing, cell/Verlet lists, GPU kernels,
+parallel scatter, migration, multi-generation reproducibility:
+OPEN, correctly untouched until a verified dynamics exists
+whose contract they must preserve.
 
 ## Principles
 

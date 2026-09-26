@@ -1,0 +1,88 @@
+mncs 0.18;
+
+// Native contracts for species and units: validation arms, argon
+// reference data, SI conversions, and reduced-unit projections.
+
+module mncs.atomic.test.species.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.species;
+use mncs.numerics.scalar_float;
+
+test valid_species_accepted() -> (result: TestResult) {
+    let good: bool = species_are_ok(check_species(species(1.0, 1.0, 1.0)));
+    return from_assertion(equals_bool(true, good, 7101));
+}
+
+test bad_parameters_rejected_in_order() -> (result: TestResult) {
+    // Mass reports before epsilon before sigma (check order is a contract).
+    let mass: bool = match check_species(species(0.0, 1.0, 1.0)) {
+        SpecCheck.Ok => false,
+        SpecCheck.BadMass => true,
+        SpecCheck.BadEpsilon => false,
+        SpecCheck.BadSigma => false,
+    };
+    let eps: bool = match check_species(species(1.0, 0.0 - 1.0, 1.0)) {
+        SpecCheck.Ok => false,
+        SpecCheck.BadMass => false,
+        SpecCheck.BadEpsilon => true,
+        SpecCheck.BadSigma => false,
+    };
+    let sig: bool = match check_species(species(1.0, 1.0, 0.0)) {
+        SpecCheck.Ok => false,
+        SpecCheck.BadMass => false,
+        SpecCheck.BadEpsilon => false,
+        SpecCheck.BadSigma => true,
+    };
+    return from_assertion(equals_bool(true, mass && eps && sig, 7102));
+}
+
+test argon_reference_data_pinned() -> (result: TestResult) {
+    // Frozen reference values (literals parse identically both sides).
+    let good: bool = argon_mass_amu() == 39.948 && argon_epsilon_kelvin() == 119.8 && argon_sigma_angstrom() == 3.405;
+    return from_assertion(equals_bool(true, good, 7103));
+}
+
+test si_constants_exact_by_definition() -> (result: TestResult) {
+    let good: bool = boltzmann_j_per_k() == 1.380649e-23 && amu_kg() == 1.66053906660e-27 && angstrom_m() == 1.0e-10;
+    return from_assertion(equals_bool(true, good, 7104));
+}
+
+test argon_species_si_values() -> (result: TestResult) {
+    // Oracle-pinned: m ≈ 6.6335e-26 kg, eps ≈ 1.65402e-21 J.
+    let s: Species = argon_species_si();
+    let good: bool = species_are_ok(check_species(s));
+    let m: bool = approx(s.mass, 6.63352146325368e-26, 0.0, 0.000000001);
+    let e: bool = approx(s.epsilon, 1.654017502e-21, 0.0, 0.000000001);
+    let l: bool = s.sigma == 3.405e-10;
+    return from_assertion(equals_bool(true, good && m && e && l, 7105));
+}
+
+test conversions_single_spelling() -> (result: TestResult) {
+    // Each conversion agrees with its constant times the input.
+    let m: bool = amu_to_kg(2.0) == 2.0 * amu_kg();
+    let e: bool = kelvin_eps_to_joule(100.0) == 100.0 * boltzmann_j_per_k();
+    let l: bool = angstrom_to_m(3.405) == 3.405 * angstrom_m();
+    return from_assertion(equals_bool(true, m && e && l, 7106));
+}
+
+test reduced_projections() -> (result: TestResult) {
+    let len: bool = match reduced_length(3.405e-10, 3.405e-10) {
+        RedOut.Value { v } => v == 1.0,
+        RedOut.BadScale => false,
+    };
+    let en: bool = match reduced_energy(1.654017502e-21, 1.654017502e-21) {
+        RedOut.Value { v } => v == 1.0,
+        RedOut.BadScale => false,
+    };
+    let bad: bool = match reduced_length(1.0, 0.0) {
+        RedOut.Value { v } => v != v,
+        RedOut.BadScale => true,
+    };
+    let bad_t: bool = match reduced_temperature(1.0, 0.0 - 2.0) {
+        RedOut.Value { v } => v != v,
+        RedOut.BadScale => true,
+    };
+    return from_assertion(equals_bool(true, len && en && bad && bad_t, 7107));
+}

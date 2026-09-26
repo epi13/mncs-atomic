@@ -1,0 +1,138 @@
+mncs 0.18;
+
+// mncs.atomic.species.v1 — particle species and unit discipline.
+//
+// A species is Lennard-Jones parameters plus mass, all SI:
+//   mass    — kg
+//   epsilon — J (LJ well depth)
+//   sigma   — m (LJ length scale)
+// Human symbols ("Ar") are presentation only: species identity is
+// the validated parameter triple, and two atoms of one species are
+// distinct entities (see state1d identity notes), never one string.
+//
+// Units: MNCS provides no reusable dimensional-analysis system, so
+// units live in documented contracts (pressure P-ATOMIC-UNITS). The
+// dynamics kernels take (epsilon, sigma, mass) as plain parameters
+// and run in ANY coherent unit system — including Lennard-Jones
+// reduced units (sigma = epsilon = mass = 1), which the canonical
+// verification uses. Conversions below bridge SI reference data to
+// simulation parameters; validity (positivity) is a data outcome,
+// never a trap.
+//
+// Argon reference data (frozen reference, not live data):
+//   mass 39.948 u, epsilon/kB 119.8 K, sigma 3.405 A.
+// These textbook LJ parameters for argon stem from second-virial
+// fits (Michels, Wijker & Wijker; Hirschfelder-Curtiss-Bird
+// tabulation). They carry the usual several-percent transferability
+// uncertainty and are pinned here for reproducibility, versioned by
+// this source revision — not claimed as primary metrology. The
+// SI-defining constants (kB, u) are exact by SI definition.
+
+module mncs.atomic.species.v1;
+
+// Lennard-Jones species in SI: mass (kg), well depth (J), scale (m).
+record Species { mass: f64, epsilon: f64, sigma: f64 }
+
+fn species(mass: f64, epsilon: f64, sigma: f64) -> (result: Species) {
+    return Species { mass: mass, epsilon: epsilon, sigma: sigma };
+}
+
+// Outcome of validating a species for classical dynamics.
+enum SpecCheck { Ok, BadMass, BadEpsilon, BadSigma }
+
+fn check_species(s: Species) -> (result: SpecCheck) {
+    if s.mass <= 0.0 {
+        return SpecCheck.BadMass;
+    }
+    if s.epsilon <= 0.0 {
+        return SpecCheck.BadEpsilon;
+    }
+    if s.sigma <= 0.0 {
+        return SpecCheck.BadSigma;
+    }
+    return SpecCheck.Ok;
+}
+
+fn species_are_ok(c: SpecCheck) -> (result: bool) {
+    return match c {
+        SpecCheck.Ok => true,
+        SpecCheck.BadMass => false,
+        SpecCheck.BadEpsilon => false,
+        SpecCheck.BadSigma => false,
+    };
+}
+
+// Argon reference parameters (see header provenance).
+fn argon_mass_amu() -> (result: f64) {
+    return 39.948;
+}
+
+fn argon_epsilon_kelvin() -> (result: f64) {
+    return 119.8;
+}
+
+fn argon_sigma_angstrom() -> (result: f64) {
+    return 3.405;
+}
+
+// Exact SI-defining constants.
+fn boltzmann_j_per_k() -> (result: f64) {
+    return 1.380649e-23;
+}
+
+fn amu_kg() -> (result: f64) {
+    return 1.66053906660e-27;
+}
+
+fn angstrom_m() -> (result: f64) {
+    return 1.0e-10;
+}
+
+// Pure conversions (total on finite inputs; validity is enforced at
+// species construction, not inside the factors).
+fn amu_to_kg(amu: f64) -> (result: f64) {
+    return amu * amu_kg();
+}
+
+fn kelvin_eps_to_joule(kelvin: f64) -> (result: f64) {
+    return kelvin * boltzmann_j_per_k();
+}
+
+fn angstrom_to_m(angstrom: f64) -> (result: f64) {
+    return angstrom * angstrom_m();
+}
+
+// Argon species in SI, derived from the reference data above through
+// the single-spelling conversions (no second formula anywhere).
+fn argon_species_si() -> (result: Species) {
+    return Species {
+        mass: amu_to_kg(argon_mass_amu()),
+        epsilon: kelvin_eps_to_joule(argon_epsilon_kelvin()),
+        sigma: angstrom_to_m(argon_sigma_angstrom()),
+    };
+}
+
+// Reduced-unit projections (simulation value per unit scale).
+// Guards make a degenerate scale structured `BadScale`.
+enum RedOut { Value { v: f64 }, BadScale }
+
+fn reduced_length(x: f64, sigma: f64) -> (result: RedOut) {
+    if sigma <= 0.0 {
+        return RedOut.BadScale;
+    }
+    return RedOut.Value { v: x / sigma };
+}
+
+fn reduced_energy(e: f64, epsilon: f64) -> (result: RedOut) {
+    if epsilon <= 0.0 {
+        return RedOut.BadScale;
+    }
+    return RedOut.Value { v: e / epsilon };
+}
+
+fn reduced_temperature(kb_t: f64, epsilon: f64) -> (result: RedOut) {
+    if epsilon <= 0.0 {
+        return RedOut.BadScale;
+    }
+    return RedOut.Value { v: kb_t / epsilon };
+}

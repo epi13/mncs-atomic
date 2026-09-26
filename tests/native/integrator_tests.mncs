@@ -1,0 +1,107 @@
+mncs 0.18;
+
+// Native contracts for velocity-Verlet integration: exact position
+// half-step, oracle-pinned full step, free drift beyond cutoff,
+// bitwise momentum, three-lane accumulation, short-horizon smoke,
+// and invalid-step structure.
+
+module mncs.atomic.test.integrator.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.state1d;
+use mncs.atomic.integrator;
+use mncs.numerics.scalar_float;
+
+test vv_positions_exact_from_rest() -> (result: TestResult) {
+    // Rest at r = sigma, dt = 1/16: x0' = -3/64, x1' = 67/64.
+    let good: bool = match vv_step_2(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0625, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => x0 == 0.0 - 0.046875 && x1 == 1.046875,
+        Step2.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7401));
+}
+
+test vv_full_step_matches_oracle() -> (result: TestResult) {
+    // Same step: velocities and new energy vs oracle floats.
+    let tol: f64 = 0.000000001;
+    let good: bool = match vv_step_2(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0625, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => approx(v0, 0.0 - 0.817373845178745, tol, tol) && approx(v1, 0.817373845178745, tol, tol) && approx(u, 0.0 - 0.971704780578816, tol, tol),
+        Step2.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7402));
+}
+
+test vv_momentum_bitwise() -> (result: TestResult) {
+    // Antisymmetric application keeps P == 0 bitwise after one step.
+    let p: f64 = match vv_step_2(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0625, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => momentum_2(v0, v1, 1.0, 1.0),
+        Step2.BadInput => 0.0 - 999.0,
+    };
+    return from_assertion(equals_bool(true, p == 0.0, 7403));
+}
+
+test vv_free_drift_beyond_cutoff() -> (result: TestResult) {
+    // Pair at r = 5 > rc: uniform motion, u = 0, exactly.
+    let good: bool = match vv_step_2(0.0, 5.0, 0.5, 0.0 - 0.25, 1.0, 1.0, 0.25, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => x0 == 0.125 && x1 == 5.0 - 0.0625 && v0 == 0.5 && v1 == 0.0 - 0.25 && u == 0.0,
+        Step2.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7404));
+}
+
+test vv_rejects_bad_input() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let bad_m: bool = match vv_step_2(0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0625, 1.0, 1.0, b, 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => x0 != x0,
+        Step2.BadInput => true,
+    };
+    let bad_dt: bool = match vv_step_2(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, b, 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => x0 != x0,
+        Step2.BadInput => true,
+    };
+    let bad_box: bool = match vv_step_2(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0625, 1.0, 1.0, simulation_box(0.0), 2.5) {
+        Step2.Value { x0, x1, v0, v1, u } => x0 != x0,
+        Step2.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_m && bad_dt && bad_box, 7405));
+}
+
+test energies_bookkeeping() -> (result: TestResult) {
+    // K = 1/2·(v0² + v1²) = 1/2·(0.25 + 1) = 0.625 exact.
+    let ke: f64 = kinetic_2(0.5, 0.0 - 1.0, 1.0, 1.0);
+    let p: f64 = momentum_2(0.5, 0.0 - 1.0, 1.0, 1.0);
+    let e: f64 = total_energy(ke, 0.0 - 2.0);
+    return from_assertion(equals_bool(true, ke == 0.625 && p == 0.0 - 0.5 && e == 0.0 - 1.375, 7406));
+}
+
+test three_lane_accumulation_matches_oracle() -> (result: TestResult) {
+    // Lanes [0, 1, 2.2], box 10, rc 2.5: oracle reference triple.
+    let tol: f64 = 0.000000001;
+    let good: bool = match pair_forces_3(0.0, 1.0, 2.2, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Force3Out.Value { f } => approx(f.f0, 0.0 - 23.905480105056760, tol, tol) && approx(f.f1, 26.211693342223079, tol, tol) && approx(f.f2, 0.0 - 2.306213237166317, tol, tol) && approx(f.u, 0.0 - 0.925933745303517, tol, tol),
+        Force3Out.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7407));
+}
+
+test three_lane_forces_sum_to_zero() -> (result: TestResult) {
+    // Newton-III across three lanes: zero net force to rounding.
+    let tol: f64 = 0.000000000001;
+    let good: bool = match pair_forces_3(0.0, 1.0, 2.2, 1.0, 1.0, simulation_box(10.0), 2.5) {
+        Force3Out.Value { f } => approx(f.f0 + f.f1 + f.f2, 0.0, tol, 0.0),
+        Force3Out.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7408));
+}
+
+test short_horizon_smoke() -> (result: TestResult) {
+    // 32 steps at dt = 0.002 from [0, 1.3]: runs, drifts little,
+    // separates within bounds, momentum held.
+    let b: Box = simulation_box(10.0);
+    let p: Params = Params { m0: 1.0, m1: 1.0, dt: 0.002, eps: 1.0, sig: 1.0, rc: 2.5 };
+    let done: Run2 = run_32_2(run_init_2(0.0, 1.3, 0.0, 0.0, 0.0 - 0.6570169144600471, 0.0 - 0.6570169144600471, 1.3), p, b);
+    let ke: f64 = kinetic_2(done.v0, done.v1, 1.0, 1.0);
+    let good: bool = done.ok && done.maxdrift < 0.000001 && done.rmin < 1.3 && done.rmax <= 1.3 && momentum_2(done.v0, done.v1, 1.0, 1.0) == 0.0 && ke >= 0.0;
+    return from_assertion(equals_bool(true, good, 7409));
+}

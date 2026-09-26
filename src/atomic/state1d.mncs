@@ -1,0 +1,99 @@
+mncs 0.18;
+
+// mncs.atomic.state1d.v1 — 1D periodic particle state.
+//
+// Positions live in a periodic box of length L: lane identity is the
+// particle id (u64), NEVER the coordinate. Two atoms of one species
+// share every physical property and remain distinct entities; the
+// model rejects duplicated ids as data (`IdsOut`), because merged
+// identities would silently corrupt force accumulation.
+//
+// Minimum image: dx_mi = dx - L*round(dx/L) via `fround` (half away
+// from zero; ties land on the closed boundary, still a valid image).
+// Wrapping: x - L*floor(x/L) into [0, L). Both need L > 0, guarded.
+// Squared distances (r²) are first-class: the LJ kernel needs no
+// square root, and the missing/present sqrt question stays a Numeric
+// concern rather than an Atomic workaround.
+
+module mncs.atomic.state1d.v1;
+
+use mncs.numerics.scalar_float;
+
+// Periodic box: length L in length units (m or reduced).
+record Box { length: f64 }
+
+fn simulation_box(length: f64) -> (result: Box) {
+    return Box { length: length };
+}
+
+enum BoxCheck { Ok, BadLength }
+
+fn check_box(b: Box) -> (result: BoxCheck) {
+    if b.length <= 0.0 {
+        return BoxCheck.BadLength;
+    }
+    return BoxCheck.Ok;
+}
+
+fn box_is_ok(c: BoxCheck) -> (result: bool) {
+    return match c {
+        BoxCheck.Ok => true,
+        BoxCheck.BadLength => false,
+    };
+}
+
+// Minimum-image displacement in (-L/2, L/2]: the nearest periodic
+// image of the raw separation dx.
+enum ImageOut { Value { dx: f64 }, BadBox }
+
+fn min_image(dx: f64, b: Box) -> (result: ImageOut) {
+    return match check_box(b) {
+        BoxCheck.Ok => ImageOut.Value { dx: dx - b.length * fround(dx / b.length) },
+        BoxCheck.BadLength => ImageOut.BadBox,
+    };
+}
+
+// Wrap a coordinate into [0, L).
+enum WrapOut { Value { x: f64 }, BadBox }
+
+fn wrap_position(x: f64, b: Box) -> (result: WrapOut) {
+    return match check_box(b) {
+        BoxCheck.Ok => WrapOut.Value { x: x - b.length * ffloor(x / b.length) },
+        BoxCheck.BadLength => WrapOut.BadBox,
+    };
+}
+
+// Minimum-image squared distance between two lanes: the quantity the
+// pair potential consumes directly.
+enum DistOut { Value { r2: f64 }, BadBox }
+
+fn pair_r2(x0: f64, x1: f64, b: Box) -> (result: DistOut) {
+    return match min_image(x1 - x0, b) {
+        ImageOut.Value { dx } => DistOut.Value { r2: dx * dx },
+        ImageOut.BadBox => DistOut.BadBox,
+    };
+}
+
+// Particle-identity discipline: ids must be pairwise distinct.
+// Property equality never implies identity.
+enum IdsOut { Distinct, Duplicated }
+
+fn check_dimer_ids(a: u64, b: u64) -> (result: IdsOut) {
+    if a == b {
+        return IdsOut.Duplicated;
+    }
+    return IdsOut.Distinct;
+}
+
+fn check_trimer_ids(a: u64, b: u64, c: u64) -> (result: IdsOut) {
+    if a == b {
+        return IdsOut.Duplicated;
+    }
+    if b == c {
+        return IdsOut.Duplicated;
+    }
+    if a == c {
+        return IdsOut.Duplicated;
+    }
+    return IdsOut.Distinct;
+}

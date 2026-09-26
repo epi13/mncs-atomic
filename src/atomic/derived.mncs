@@ -1,0 +1,39 @@
+mncs 0.18;
+
+// mncs.atomic.derived.v1 — ensemble-adjacent derived quantities.
+//
+// Kinetic temperature from equipartition: T = 2*K/(dof*kB), with the
+// Boltzmann factor carried explicitly so SI and reduced (kB = 1)
+// evaluations share one spelling. Degrees of freedom are caller
+// data (the model passes them; thermostats that would constrain
+// dof are deferred scope, not hidden defaults). Drift acceptance is
+// a checked predicate with a positive tolerance, mirroring the
+// residual discipline: a non-positive tolerance accepts nothing.
+
+module mncs.atomic.derived.v1;
+
+// Kinetic temperature in temperature units (K, or reduced when
+// kb = 1): T = 2K/(dof·kB).
+enum TempOut { Value { t: f64 }, BadInput }
+
+fn kinetic_temperature(ke: f64, dof: u64, kb: f64) -> (result: TempOut) {
+    if kb <= 0.0 {
+        return TempOut.BadInput;
+    }
+    if ke < 0.0 {
+        return TempOut.BadInput;
+    }
+    if dof == 0 {
+        return TempOut.BadInput;
+    }
+    return TempOut.Value { t: 2.0 * ke / ((dof as f64) * kb) };
+}
+
+// Energy-drift acceptance: worst observed |E - E0| within tol.
+// A non-positive tolerance is structured false, never a trap.
+fn drift_within(maxdrift: f64, tol: f64) -> (result: bool) {
+    if tol <= 0.0 {
+        return false;
+    }
+    return maxdrift <= tol;
+}

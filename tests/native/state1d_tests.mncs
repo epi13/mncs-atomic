@@ -1,0 +1,101 @@
+mncs 0.18;
+
+// Native contracts for periodic state: box validation, minimum
+// images, wrapping, squared distances, and id distinctness. Exact
+// `==` throughout (all values dyadic).
+
+module mncs.atomic.test.state1d.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.state1d;
+
+test box_validation() -> (result: TestResult) {
+    let good: bool = box_is_ok(check_box(simulation_box(10.0)));
+    let bad: bool = match check_box(simulation_box(0.0)) {
+        BoxCheck.Ok => false,
+        BoxCheck.BadLength => true,
+    };
+    let neg: bool = match check_box(simulation_box(0.0 - 3.0)) {
+        BoxCheck.Ok => false,
+        BoxCheck.BadLength => true,
+    };
+    return from_assertion(equals_bool(true, good && bad && neg, 7201));
+}
+
+test minimum_images() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let fwd: bool = match min_image(6.0, b) {
+        ImageOut.Value { dx } => dx == 0.0 - 4.0,
+        ImageOut.BadBox => false,
+    };
+    let back: bool = match min_image(0.0 - 6.0, b) {
+        ImageOut.Value { dx } => dx == 4.0,
+        ImageOut.BadBox => false,
+    };
+    let near: bool = match min_image(3.0, b) {
+        ImageOut.Value { dx } => dx == 3.0,
+        ImageOut.BadBox => false,
+    };
+    // Half-box tie goes to the closed boundary (half away from zero).
+    let tie: bool = match min_image(15.0, b) {
+        ImageOut.Value { dx } => dx == 0.0 - 5.0,
+        ImageOut.BadBox => false,
+    };
+    let bad: bool = match min_image(1.0, simulation_box(0.0)) {
+        ImageOut.Value { dx } => dx != dx,
+        ImageOut.BadBox => true,
+    };
+    return from_assertion(equals_bool(true, fwd && back && near && tie && bad, 7202));
+}
+
+test wrapping() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let above: bool = match wrap_position(12.5, b) {
+        WrapOut.Value { x } => x == 2.5,
+        WrapOut.BadBox => false,
+    };
+    let under: bool = match wrap_position(0.0 - 1.0, b) {
+        WrapOut.Value { x } => x == 9.0,
+        WrapOut.BadBox => false,
+    };
+    let inside: bool = match wrap_position(3.25, b) {
+        WrapOut.Value { x } => x == 3.25,
+        WrapOut.BadBox => false,
+    };
+    return from_assertion(equals_bool(true, above && under && inside, 7203));
+}
+
+test pair_squared_distance() -> (result: TestResult) {
+    let near: bool = match pair_r2(0.0, 1.0, simulation_box(10.0)) {
+        DistOut.Value { r2 } => r2 == 1.0,
+        DistOut.BadBox => false,
+    };
+    // Across the boundary: lanes 9 and 1 are 2 apart, r² = 4.
+    let across: bool = match pair_r2(9.0, 1.0, simulation_box(10.0)) {
+        DistOut.Value { r2 } => r2 == 4.0,
+        DistOut.BadBox => false,
+    };
+    return from_assertion(equals_bool(true, near && across, 7204));
+}
+
+test identity_is_not_property_equality() -> (result: TestResult) {
+    // Distinct ids are distinct entities even with identical species.
+    let distinct: bool = match check_dimer_ids(0, 1) {
+        IdsOut.Distinct => true,
+        IdsOut.Duplicated => false,
+    };
+    let dup: bool = match check_dimer_ids(7, 7) {
+        IdsOut.Distinct => false,
+        IdsOut.Duplicated => true,
+    };
+    let tri_ok: bool = match check_trimer_ids(0, 1, 2) {
+        IdsOut.Distinct => true,
+        IdsOut.Duplicated => false,
+    };
+    let tri_dup: bool = match check_trimer_ids(0, 1, 0) {
+        IdsOut.Distinct => false,
+        IdsOut.Duplicated => true,
+    };
+    return from_assertion(equals_bool(true, distinct && dup && tri_ok && tri_dup, 7205));
+}

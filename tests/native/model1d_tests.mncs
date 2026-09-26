@@ -1,0 +1,115 @@
+mncs 0.18;
+
+// End-to-end verification of the 1D Lennard-Jones workloads in
+// reduced units (eps = sig = m = 1, box 10, rc 2.5): static dimer
+// at r = sigma, the 256-step displaced-dimer oscillation against
+// the oracle trajectory, free-drift limiting case, three-lane
+// superposition, and degenerate-model rejection.
+
+module mncs.atomic.test.model1d.v1;
+
+use mncs.test.assertions;
+use mncs.test.suite;
+use mncs.atomic.species;
+use mncs.atomic.state1d;
+use mncs.atomic.model1d;
+use mncs.numerics.scalar_float;
+
+test dimer_at_sigma_exact() -> (result: TestResult) {
+    // r = sigma, v = 0: F = ∓24, U = 0, K = 0, P = 0.
+    let good: bool = match dimer_at_sigma(0, 1, species(1.0, 1.0, 1.0), simulation_box(10.0)) {
+        DimerStatic.Value { f0, f1, u, ke, p } => f0 == 0.0 - 24.0 && f1 == 24.0 && u == 0.0 && ke == 0.0 && p == 0.0,
+        DimerStatic.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7601));
+}
+
+test dimer_static_rejects_degenerate() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let s: Species = species(1.0, 1.0, 1.0);
+    let bad_species: bool = match dimer_at_sigma(0, 1, species(1.0, 0.0, 1.0), b) {
+        DimerStatic.Value { f0, f1, u, ke, p } => f0 != f0,
+        DimerStatic.BadInput => true,
+    };
+    let bad_box: bool = match dimer_at_sigma(0, 1, s, simulation_box(0.0)) {
+        DimerStatic.Value { f0, f1, u, ke, p } => f0 != f0,
+        DimerStatic.BadInput => true,
+    };
+    // Duplicated ids: one entity cannot exert force on itself.
+    let dup_ids: bool = match dimer_at_sigma(3, 3, s, b) {
+        DimerStatic.Value { f0, f1, u, ke, p } => f0 != f0,
+        DimerStatic.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_species && bad_box && dup_ids, 7602));
+}
+
+test dimer_run_matches_oracle_trajectory() -> (result: TestResult) {
+    // 256 steps, dt = 0.002, from [0, 1.3]: oracle reference triple.
+    let tol: f64 = 0.000000001;
+    let good: bool = match dimer_run(0, 1, species(1.0, 1.0, 1.0), simulation_box(10.0), 0.0, 1.3, 0.002, 2.5) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => approx(x0, 0.074583575611954, tol, tol) && approx(x1, 1.225416424388045, tol, tol) && approx(v0, 0.0 - 0.568877055144355, tol, tol) && approx(v1, 0.568877055144355, tol, tol) && approx(u, 0.0 - 0.980653279939925, tol, tol),
+        DimerRun.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7603));
+}
+
+test dimer_run_invariants() -> (result: TestResult) {
+    // Drift bounded, genuine oscillation, bitwise momentum, clock.
+    let good: bool = match dimer_run(0, 1, species(1.0, 1.0, 1.0), simulation_box(10.0), 0.0, 1.3, 0.002, 2.5) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => maxdrift < 0.0001 && rmin < 1.05 && rmax > 1.29 && p == 0.0 && steps == 256 && approx(t, 0.512, 0.000000000000001, 0.0) && ke >= 0.0,
+        DimerRun.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7604));
+}
+
+test dimer_run_rejects_degenerate() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let s: Species = species(1.0, 1.0, 1.0);
+    let bad_dt: bool = match dimer_run(0, 1, s, b, 0.0, 1.3, 0.0, 2.5) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => x0 != x0,
+        DimerRun.BadInput => true,
+    };
+    let bad_rc: bool = match dimer_run(0, 1, s, b, 0.0, 1.3, 0.002, 0.0) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => x0 != x0,
+        DimerRun.BadInput => true,
+    };
+    let dup_ids: bool = match dimer_run(5, 5, s, b, 0.0, 1.3, 0.002, 2.5) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => x0 != x0,
+        DimerRun.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, bad_dt && bad_rc && dup_ids, 7605));
+}
+
+test dimer_free_drift_limiting_case() -> (result: TestResult) {
+    // Start beyond the cutoff at rest: no forces ever, the pair sits
+    // exactly still for all 256 steps with u = 0 throughout.
+    let good: bool = match dimer_run(0, 1, species(1.0, 1.0, 1.0), simulation_box(10.0), 0.0, 5.0, 0.002, 2.5) {
+        DimerRun.Value { x0, x1, v0, v1, u, ke, p, t, steps, maxdrift, rmin, rmax } => x0 == 0.0 && x1 == 5.0 && v0 == 0.0 && v1 == 0.0 && u == 0.0 && ke == 0.0 && p == 0.0 && maxdrift == 0.0 && rmin == 5.0 && rmax == 5.0,
+        DimerRun.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7606));
+}
+
+test chain_static_matches_oracle() -> (result: TestResult) {
+    // Lanes [0, 1, 2.2]: superposition vs oracle reference.
+    let tol: f64 = 0.000000001;
+    let good: bool = match chain_static_3(0, 1, 2, species(1.0, 1.0, 1.0), simulation_box(10.0), 0.0, 1.0, 2.2, 2.5) {
+        Chain3.Value { f0, f1, f2, u } => approx(f0, 0.0 - 23.905480105056760, tol, tol) && approx(f1, 26.211693342223079, tol, tol) && approx(f2, 0.0 - 2.306213237166317, tol, tol) && approx(u, 0.0 - 0.925933745303517, tol, tol),
+        Chain3.BadInput => false,
+    };
+    return from_assertion(equals_bool(true, good, 7607));
+}
+
+test chain_static_rejects_degenerate() -> (result: TestResult) {
+    let b: Box = simulation_box(10.0);
+    let s: Species = species(1.0, 1.0, 1.0);
+    let dup: bool = match chain_static_3(0, 1, 0, s, b, 0.0, 1.0, 2.2, 2.5) {
+        Chain3.Value { f0, f1, f2, u } => f0 != f0,
+        Chain3.BadInput => true,
+    };
+    let bad_rc: bool = match chain_static_3(0, 1, 2, s, b, 0.0, 1.0, 2.2, 0.0 - 1.0) {
+        Chain3.Value { f0, f1, f2, u } => f0 != f0,
+        Chain3.BadInput => true,
+    };
+    return from_assertion(equals_bool(true, dup && bad_rc, 7608));
+}

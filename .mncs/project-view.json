@@ -1,0 +1,36 @@
+{
+  "capabilities": [
+    {
+      "contract": "atomic-simulation",
+      "fingerprint_sources": [
+        "src/atomic/"
+      ],
+      "kind": "mncs-library",
+      "stability": "experimental",
+      "version": "0.1"
+    }
+  ],
+  "dependencies": [
+    {
+      "contract": "mncs-numerics.numeric-primitives",
+      "envelope": {
+        "op": "compatible-minor",
+        "version": "1"
+      },
+      "evidence_refs": [
+        "src/atomic/integrator.mncs",
+        "src/atomic/model1d.mncs",
+        "src/atomic/state1d.mncs"
+      ],
+      "required": true
+    }
+  ],
+  "entry": [
+    "python3 scripts/run_tests.py"
+  ],
+  "purpose": "Machine-native classical particle simulation for MNCS: atoms as Lennard-Jones particles in periodic boxes integrated with velocity-Verlet dynamics, expressed natively in mncs-language.",
+  "repository": "mncs-atomic",
+  "schema_version": "mncs.project-view/1",
+  "source_identity": "sha256:7e761c5a6e963ef0347d5e795df8fd12e89a19c2f0d57b38cc9c06baa2e6eea1",
+  "structure": {}
+}

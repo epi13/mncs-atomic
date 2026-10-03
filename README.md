@@ -1,6 +1,19 @@
 # mncs-atomic
 
 <!-- MNCS:generated:begin -->
+## Project entry
+
+Machine-native classical particle simulation for MNCS: atoms as Lennard-Jones particles in periodic boxes integrated with velocity-Verlet dynamics, expressed natively in mncs-language.
+
+```bash
+python3 scripts/run_tests.py
+```
+
+Declared capabilities (declarations do not establish execution health):
+
+- `atomic-simulation/0.1` — mncs-library (experimental)
+
+Semantic sources and ownership: `.mncs/projections.json`.
 <!-- MNCS:generated:end -->
 
 Machine-native classical particle simulation for MNCS: atoms as

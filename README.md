@@ -1,5 +1,8 @@
 # mncs-atomic
 
+<!-- MNCS:generated:begin -->
+<!-- MNCS:generated:end -->
+
 Machine-native classical particle simulation for MNCS: atoms as
 Lennard-Jones particles in periodic boxes, integrated with
 velocity-Verlet dynamics. **Not CPU atomic operations** (no
